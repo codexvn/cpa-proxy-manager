@@ -143,7 +143,7 @@ func inventoryPage(query url.Values) (rows []CredentialView, f PageFilter, total
 		return nil, f, 0, 0, nil, "", nil, errList
 	}
 	providers = distinctProviders(entries)
-	filtered := FilterEntries(entries, f.Q, f.Provider)
+	filtered := FilterEntries(entries, f.Q, f.Provider, f.Bound)
 	total = len(filtered)
 	pageEntries, page, pages := PageSlice(filtered, f.Page, f.Size)
 	f.Page = page

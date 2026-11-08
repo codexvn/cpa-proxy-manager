@@ -3,11 +3,13 @@ package main
 // credentials.go builds the credential inventory in real time. Every request
 // starts from one host.auth.list call for metadata, applies the shared filter
 // (the table page, the preview page and batch execution all consume the same
-// MatchFilter predicate), then reads only the files it needs to answer: page
-// rows for the table and preview, the full filtered set for execution. Files
-// are read directly from disk through the entry path because the plugin runs
-// in-process with the host; host.auth.get stays only as the fallback for
-// entries without a path. Nothing is cached between requests.
+// FilterEntries function), then reads only the files it needs to answer: page
+// rows for the table and preview, the full filtered set for execution. Filtering
+// by proxy binding is the exception: proxy_url is not in the list metadata, so
+// that filter reads every candidate file before paging. Files are read directly
+// from disk through the entry path because the plugin runs in-process with the
+// host; host.auth.get stays only as the fallback for entries without a path.
+// Nothing is cached between requests.
 import (
 	"encoding/json"
 	"fmt"
@@ -81,6 +83,7 @@ func callHostAuthGet(authIndex string) (pluginapi.HostAuthGetResponse, error) {
 type PageFilter struct {
 	Q        string
 	Provider string
+	Bound    string // "", "bound" or "unbound"
 	Page     int
 	Size     int
 }
@@ -96,6 +99,7 @@ func ParsePageFilter(query url.Values) PageFilter {
 	f := PageFilter{
 		Q:        strings.TrimSpace(query.Get("q")),
 		Provider: strings.TrimSpace(query.Get("provider")),
+		Bound:    normalizeBound(query.Get("bound")),
 		Page:     1,
 		Size:     defaultPageSize,
 	}
@@ -113,8 +117,9 @@ func ParsePageFilter(query url.Values) PageFilter {
 
 // MatchFilter reports whether one inventory entry matches the query filter:
 // provider compares exactly, q matches case-insensitively against email or
-// file name. The table page, the preview page and batch execution all call
-// this one predicate so the three views cannot diverge.
+// file name. Proxy binding is applied later by FilterEntries, because
+// proxy_url is not on the list entry. The table page, the preview page and
+// batch execution all call FilterEntries so the three views cannot diverge.
 func MatchFilter(entry pluginapi.HostAuthFileEntry, q, provider string) bool {
 	if provider != "" && entry.Provider != provider {
 		return false
@@ -127,8 +132,60 @@ func MatchFilter(entry pluginapi.HostAuthFileEntry, q, provider string) bool {
 		strings.Contains(strings.ToLower(entry.Name), needle)
 }
 
+// normalizeBound accepts only the two explicit proxy-binding filters.
+// Anything else, including empty, means "do not filter on binding".
+func normalizeBound(v string) string {
+	switch strings.TrimSpace(v) {
+	case "bound", "unbound":
+		return strings.TrimSpace(v)
+	default:
+		return ""
+	}
+}
+
+// proxyBound reports whether an auth file has a known, non-empty proxy_url.
+// known is false when the file cannot be read; those rows are neither bound
+// nor unbound.
+func proxyBound(entry pluginapi.HostAuthFileEntry) (known, bound bool) {
+	_, proxyURL, known := readAuthDoc(entry)
+	if !known {
+		return false, false
+	}
+	return true, strings.TrimSpace(proxyURL) != ""
+}
+
+// filterByProxyBound keeps entries whose auth file matches the binding filter.
+// Order is preserved. Reads use the same concurrency cap as Hydrate, because
+// proxy_url is not part of the host.auth.list metadata.
+func filterByProxyBound(entries []pluginapi.HostAuthFileEntry, bound string) []pluginapi.HostAuthFileEntry {
+	keep := make([]bool, len(entries))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, fileReadConcurrency)
+	for i := range entries {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			known, has := proxyBound(entries[idx])
+			keep[idx] = known && ((bound == "bound" && has) || (bound == "unbound" && !has))
+		}(i)
+	}
+	wg.Wait()
+	out := make([]pluginapi.HostAuthFileEntry, 0, len(entries))
+	for i, entry := range entries {
+		if keep[i] {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // FilterEntries drops runtime-only entries and keeps the matching ones.
-func FilterEntries(entries []pluginapi.HostAuthFileEntry, q, provider string) []pluginapi.HostAuthFileEntry {
+// bound is "", "bound" (non-empty proxy_url) or "unbound" (a readable file
+// whose proxy_url is empty). Unreadable files match neither binding filter.
+func FilterEntries(entries []pluginapi.HostAuthFileEntry, q, provider, bound string) []pluginapi.HostAuthFileEntry {
+	bound = normalizeBound(bound)
 	out := make([]pluginapi.HostAuthFileEntry, 0, len(entries))
 	for _, entry := range entries {
 		if entry.RuntimeOnly || entry.AuthIndex == "" {
@@ -138,7 +195,10 @@ func FilterEntries(entries []pluginapi.HostAuthFileEntry, q, provider string) []
 			out = append(out, entry)
 		}
 	}
-	return out
+	if bound == "" {
+		return out
+	}
+	return filterByProxyBound(out, bound)
 }
 
 // PageSlice clamps page into range and returns that slice plus the adjusted
@@ -302,6 +362,7 @@ type batchRequest struct {
 	Indexes  []string `json:"indexes"`
 	Q        string   `json:"q"`
 	Provider string   `json:"provider"`
+	Bound    string   `json:"bound"`
 	Exclude  []string `json:"exclude"`
 }
 
@@ -347,7 +408,7 @@ func resolveSelection(req batchRequest) ([]CredentialView, []string, error) {
 		for _, index := range req.Exclude {
 			excluded[index] = struct{}{}
 		}
-		for _, entry := range FilterEntries(entries, req.Q, req.Provider) {
+		for _, entry := range FilterEntries(entries, req.Q, req.Provider, req.Bound) {
 			if _, skip := excluded[entry.AuthIndex]; skip {
 				continue
 			}

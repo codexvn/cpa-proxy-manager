@@ -49,6 +49,7 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 /* 模板管理弹层 */
 .mtpl h3{font-size:13px;font-weight:600;margin:16px 0 8px;color:var(--ink)}
 .mtpl table{width:100%;border-collapse:collapse}
+.mtpl th:first-child,.mtpl td:first-child{padding-left:0}
 .mtpl th{font-size:11px;font-weight:600;color:var(--ink-2);text-align:left;padding:6px 8px;border-bottom:1px solid var(--line-2)}
 .mtpl td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
 .mtpl input{width:100%;border:1px solid var(--line-2);border-radius:4px;padding:6px 8px;background:var(--surface)}
@@ -68,14 +69,16 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 
 /* 工具行 */
 .wrap{max-width:1280px;margin:0 auto;padding:0 22px 90px}
-.toolbar{display:flex;gap:10px;align-items:center;padding:16px 0 10px;flex-wrap:wrap}
-.toolbar input[type=search]{flex:1;min-width:200px;max-width:380px;background:var(--panel);border:1px solid var(--line-2);border-radius:4px;padding:7px 12px}
-.toolbar input[type=search]:focus{border-color:var(--action);outline:none}
-.toolbar select{background:var(--panel);border:1px solid var(--line-2);border-radius:4px;padding:7px 10px}
-.toolbar .vsep{width:1px;height:22px;background:var(--line-2);margin:0 4px}
+.toolbar{display:flex;align-items:center;gap:16px;padding:16px 0 10px;flex-wrap:wrap}
+.toolbar .tgroup{display:flex;align-items:center;gap:16px;flex:0 0 auto}
+.toolbar input[type=search]{flex:0 1 320px;min-width:200px;height:36px;background:var(--panel);border:1px solid var(--line-2);border-radius:4px;padding:0 12px}
+.toolbar input[type=search]:focus,.toolbar select:focus{border-color:var(--action);outline:none}
+.toolbar select{height:36px;background-color:var(--panel);border:1px solid var(--line-2);border-radius:4px;padding:0 34px 0 12px;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%236d6760' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M2.5 4.5 6 8l3.5-3.5'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;background-size:12px 12px}
+.toolbar .vsep{width:1px;height:22px;background:var(--line-2)}
 .toolbar .tpl-pick{font-size:13px;font-weight:600;color:var(--ink-2);white-space:nowrap}
 .toolbar select#tplSel{min-width:170px;font-weight:500}
-.toolbar .result{margin-left:auto;font-size:12px;color:var(--ink-3);font-family:var(--mono)}
+.toolbar #tplManageBtn{height:36px;padding:0 14px;display:inline-flex;align-items:center}
+.toolbar .result{margin-left:auto;font-size:12px;color:var(--ink-3);font-family:var(--mono);white-space:nowrap}
 
 /* 账号表 */
 .tablewrap{background:var(--surface);border:1px solid var(--line-2);border-radius:8px;overflow:hidden}
@@ -152,7 +155,8 @@ table.pv{width:100%;border-collapse:collapse}
   .wrap{padding:0 12px 120px}
   .top,.actionbar{padding-left:12px;padding-right:12px}
   td.url{max-width:150px}
-  .toolbar .result{margin-left:0;width:100%}
+  .toolbar{gap:16px}
+  .toolbar .result{width:100%;text-align:right}
 }
 </style>
 </head>
@@ -167,10 +171,15 @@ table.pv{width:100%;border-collapse:collapse}
 <div class="wrap">
   <div class="toolbar">
     <input type="search" id="q" placeholder="搜索账号 / 文件名" aria-label="搜索账号">
-    <select id="providerSel" aria-label="按类型筛选"></select>
-    <span class="vsep"></span>
-    <label class="tpl-pick" for="tplSel" data-i18n="tpl_pick">代理模板</label>
-    <select id="tplSel" aria-label="选择代理模板"></select>
+    <div class="tgroup">
+      <select id="providerSel" aria-label="按类型筛选"></select>
+      <select id="boundSel" aria-label="按代理绑定状态筛选"></select>
+    </div>
+    <div class="tgroup">
+      <span class="vsep"></span>
+      <label class="tpl-pick" for="tplSel" data-i18n="tpl_pick">代理模板</label>
+      <select id="tplSel" aria-label="选择代理模板"></select>
+    </div>
     <button class="btn-sm" id="tplManageBtn" data-i18n="tpl_manage">模板管理</button>
     <span class="result" id="resultInfo"></span>
   </div>
@@ -277,6 +286,7 @@ table.pv{width:100%;border-collapse:collapse}
 const I18N = {
   title:'代理批量设置', refresh:'刷新', tpl_pick:'代理模板', tpl_manage:'模板管理',
   all_types:'全部类型',
+  bound_all:'不限绑定状态', bound_yes:'已绑定代理', bound_no:'未绑定代理',
   col_account:'账号', col_type:'类型', col_current:'当前代理', col_after:'设置后',
   empty_text:'未找到匹配的账号', clear_filter:'清除筛选',
   preview:'预览', apply:'批量设置', clear:'清空代理', stop:'停止',
@@ -396,7 +406,7 @@ async function api(path, opts){
 /* ================= 状态 ================= */
 let cfg = null;            // {templates, selected_template, placeholders, write_concurrency}
 let samples = {};          // 占位符示例值（服务端按首个匹配账号试算）
-let filters = {q:'', provider:''};
+let filters = {q:'', provider:'', bound:''};
 // 表格与预览均为服务端分页：rows 只含当前页，total/pages 来自响应
 let table = {rows: [], total: 0, page: 1, size: +(localStorage.getItem('pm.pageSize') || 50), pages: 1, providers: null};
 let pv = {rows: [], total: 0, page: 1, size: 50, pages: 1};
@@ -441,7 +451,8 @@ function skipText(reason){
 function filterQS(extra){
   const parts = [
     'q=' + encodeURIComponent(filters.q),
-    'provider=' + encodeURIComponent(filters.provider)
+    'provider=' + encodeURIComponent(filters.provider),
+    'bound=' + encodeURIComponent(filters.bound)
   ];
   if (extra) parts.push(extra);
   return parts.join('&');
@@ -537,6 +548,14 @@ function renderTplSel(){
   }
   $('tplSel').innerHTML = (cfg.templates || []).map(tp =>
     '<option value="' + esc(tp.id) + '"' + (tp.id === cfg.selected_template ? ' selected' : '') + '>' + esc(tp.name) + '</option>').join('');
+}
+function renderBoundSel(){
+  const sel0 = $('boundSel');
+  const cur = filters.bound || '';
+  sel0.innerHTML =
+    '<option value="">' + esc(t('bound_all')) + '</option>' +
+    '<option value="bound"' + (cur === 'bound' ? ' selected' : '') + '>' + esc(t('bound_yes')) + '</option>' +
+    '<option value="unbound"' + (cur === 'unbound' ? ' selected' : '') + '>' + esc(t('bound_no')) + '</option>';
 }
 function renderProviders(){
   const sel0 = $('providerSel');
@@ -725,7 +744,7 @@ function setExecLock(on){
 // 手动勾选发显式索引；服务端 plan 与 apply 用同一载荷
 function selectionPayload(mode){
   return selectAll
-    ? {mode: mode, q: filters.q, provider: filters.provider, exclude: [...excluded]}
+    ? {mode: mode, q: filters.q, provider: filters.provider, bound: filters.bound, exclude: [...excluded]}
     : {mode: mode, indexes: [...sel]};
 }
 async function openConfirm(mode){
@@ -797,7 +816,8 @@ $('q').oninput = e => {
   searchTimer = setTimeout(() => { filters.q = v; excluded.clear(); fetchTable(1); }, 300);
 };
 $('providerSel').onchange = e => { filters.provider = e.target.value; excluded.clear(); fetchTable(1); };
-$('clearFilter').onclick = () => { filters = {q:'', provider:''}; $('q').value = ''; renderProviders(); excluded.clear(); fetchTable(1); };
+$('boundSel').onchange = e => { filters.bound = e.target.value; excluded.clear(); fetchTable(1); };
+$('clearFilter').onclick = () => { filters = {q:'', provider:'', bound:''}; $('q').value = ''; renderProviders(); renderBoundSel(); excluded.clear(); fetchTable(1); };
 // 表头全选是一个标记：执行范围 = 当前筛选全集；行内取消勾选记为排除项
 $('checkAll').onchange = e => {
   selectAll = e.target.checked;
@@ -865,7 +885,7 @@ $('stopBtn').onclick = async () => { try { await api('/stop', {method:'POST'}); 
 
 /* ================= 启动 ================= */
 (async function init(){
-  renderTplSel(); renderProviders();   // 先渲染「加载中」占位，避免空下拉
+  renderTplSel(); renderProviders(); renderBoundSel();   // 先渲染「加载中」占位，避免空下拉
   loadKey();
   try { await loadConfig(); renderTplSel(); } catch(e){ toast(t('load_fail') + '：' + e.message, 'err'); }
   await fetchTable(1);
